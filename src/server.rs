@@ -2,10 +2,8 @@ use crate::encoding::{self, Value as _};
 use crate::error::{Error, Result};
 use crate::raft;
 use crate::sql;
-use crate::sql::engine::Engine as _;
-use crate::sql::execution::ResultSet;
-use crate::sql::schema::{Catalog as _, Table};
-use crate::sql::types::Row;
+use crate::sql::engine::{Catalog as _, Engine as _, StatementResult};
+use crate::sql::types::{Row, Table};
 use crate::storage;
 
 use crossbeam::channel::{Receiver, Sender};
@@ -57,8 +55,7 @@ impl Server {
                 raft_log,
                 raft_state,
                 node_tx,
-                raft::HEARTBEAT_INTERVAL,
-                raft::ELECTION_TIMEOUT_RANGE,
+                raft::Options::default(),
             )?,
             peers,
             node_rx,
@@ -105,7 +102,8 @@ impl Server {
             });
 
             // Serve inbound SQL connections.
-            s.spawn(move || Self::sql_accept(id, sql_listener, raft_request_tx));
+            let sql_engine = sql::engine::Raft::new(raft_request_tx);
+            s.spawn(move || Self::sql_accept(id, sql_listener, sql_engine));
         });
 
         Ok(())
@@ -236,12 +234,12 @@ impl Server {
                 // Track inbound client requests and step them into the node.
                 recv(request_rx) -> result => {
                     let (request, response_tx) = result.expect("request_rx disconnected");
-                    let id = uuid::Uuid::new_v4().into_bytes().to_vec();
+                    let id = uuid::Uuid::new_v4();
                     let msg = raft::Envelope{
                         from: node.id(),
                         to: node.id(),
                         term: node.term(),
-                        message: raft::Message::ClientRequest{id: id.clone(), request},
+                        message: raft::Message::ClientRequest{id, request},
                     };
                     node = node.step(msg).expect("step failed");
                     response_txs.insert(id, response_tx);
@@ -251,11 +249,7 @@ impl Server {
     }
 
     /// Accepts new SQL client connections and spawns session threads for them.
-    fn sql_accept(
-        id: raft::NodeID,
-        listener: TcpListener,
-        raft_request_tx: Sender<(raft::Request, Sender<Result<raft::Response>>)>,
-    ) {
+    fn sql_accept(id: raft::NodeID, listener: TcpListener, sql_engine: sql::engine::Raft) {
         std::thread::scope(|s| loop {
             let (socket, peer) = match listener.accept() {
                 Ok(sp) => sp,
@@ -264,10 +258,10 @@ impl Server {
                     continue;
                 }
             };
-            let raft_request_tx = raft_request_tx.clone();
+            let session = sql_engine.session();
             s.spawn(move || {
                 debug!("Client {peer} connected");
-                match Self::sql_session(id, socket, raft_request_tx) {
+                match Self::sql_session(id, socket, session) {
                     Ok(()) => debug!("Client {peer} disconnected"),
                     Err(err) => error!("Client {peer} error: {err}"),
                 }
@@ -280,22 +274,23 @@ impl Server {
     fn sql_session(
         id: raft::NodeID,
         socket: TcpStream,
-        raft_request_tx: Sender<(raft::Request, Sender<Result<raft::Response>>)>,
+        mut session: sql::engine::Session<sql::engine::Raft>,
     ) -> Result<()> {
-        let mut session = sql::engine::Raft::new(raft_request_tx).session();
         let mut reader = std::io::BufReader::new(socket.try_clone()?);
         let mut writer = std::io::BufWriter::new(socket);
 
         while let Some(request) = Request::maybe_decode_from(&mut reader)? {
             // Execute request.
             debug!("Received request {request:?}");
-            let mut response = match request {
+            let response = match request {
                 Request::Execute(query) => session.execute(&query).map(Response::Execute),
-                Request::GetTable(table) => session
-                    .with_txn_read_only(|txn| txn.must_read_table(&table))
-                    .map(Response::GetTable),
+                Request::GetTable(table) => {
+                    session.with_txn(true, |txn| txn.must_get_table(&table)).map(Response::GetTable)
+                }
                 Request::ListTables => session
-                    .with_txn_read_only(|txn| Ok(txn.scan_tables()?.map(|t| t.name).collect()))
+                    .with_txn(true, |txn| {
+                        Ok(txn.list_tables()?.into_iter().map(|t| t.name).collect())
+                    })
                     .map(Response::ListTables),
                 Request::Status => session
                     .status()
@@ -305,32 +300,7 @@ impl Server {
 
             // Process response.
             debug!("Returning response {response:?}");
-            let mut rows: Box<dyn Iterator<Item = Result<Response>> + Send> =
-                Box::new(std::iter::empty());
-            if let Ok(Response::Execute(ResultSet::Query { rows: ref mut resultrows, .. })) =
-                &mut response
-            {
-                // TODO: don't stream results, for simplicity.
-                rows = Box::new(
-                    std::mem::replace(resultrows, Box::new(std::iter::empty()))
-                        .map(|result| result.map(|row| Response::Row(Some(row))))
-                        .chain(std::iter::once(Ok(Response::Row(None))))
-                        .scan(false, |err_sent, response| match (&err_sent, &response) {
-                            (true, _) => None,
-                            (_, Err(error)) => {
-                                *err_sent = true;
-                                Some(Err(error.clone()))
-                            }
-                            _ => Some(response),
-                        })
-                        .fuse(),
-                );
-            }
-
             response.encode_into(&mut writer)?;
-            for row in rows {
-                row.encode_into(&mut writer)?;
-            }
             writer.flush()?;
         }
         Ok(())
@@ -355,7 +325,7 @@ impl encoding::Value for Request {}
 /// A SQL server response.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
-    Execute(ResultSet),
+    Execute(StatementResult),
     Row(Option<Row>),
     GetTable(Table),
     ListTables(Vec<String>),

@@ -3,10 +3,8 @@ use super::{assert_row, assert_rows, dataset, TestCluster};
 use toydb::error::{Error, Result};
 use toydb::raft;
 use toydb::server::Status;
-use toydb::sql::execution::ResultSet;
-use toydb::sql::schema;
-use toydb::sql::types::{Column, DataType, Value};
-use toydb::storage;
+use toydb::sql::engine::StatementResult;
+use toydb::sql::types::{Column, DataType, Label, Table, Value};
 use toydb::storage::{engine, mvcc};
 
 use pretty_assertions::assert_eq;
@@ -24,73 +22,67 @@ fn get_table() -> Result<()> {
     );
     assert_eq!(
         c.get_table("movies")?,
-        schema::Table {
+        Table {
             name: "movies".into(),
+            primary_key: 0,
             columns: vec![
-                schema::Column {
+                Column {
                     name: "id".into(),
                     datatype: DataType::Integer,
-                    primary_key: true,
                     nullable: false,
                     default: None,
                     unique: true,
                     index: false,
                     references: None,
                 },
-                schema::Column {
+                Column {
                     name: "title".into(),
                     datatype: DataType::String,
-                    primary_key: false,
                     nullable: false,
                     default: None,
                     unique: false,
                     index: false,
                     references: None,
                 },
-                schema::Column {
+                Column {
                     name: "studio_id".into(),
                     datatype: DataType::Integer,
-                    primary_key: false,
                     nullable: false,
                     default: None,
                     unique: false,
-                    index: false,
+                    index: true,
                     references: Some("studios".into()),
                 },
-                schema::Column {
+                Column {
                     name: "genre_id".into(),
                     datatype: DataType::Integer,
-                    primary_key: false,
                     nullable: false,
                     default: None,
                     unique: false,
-                    index: false,
+                    index: true,
                     references: Some("genres".into()),
                 },
-                schema::Column {
+                Column {
                     name: "released".into(),
                     datatype: DataType::Integer,
-                    primary_key: false,
                     nullable: false,
                     default: None,
                     unique: false,
                     index: false,
                     references: None,
                 },
-                schema::Column {
+                Column {
                     name: "rating".into(),
                     datatype: DataType::Float,
-                    primary_key: false,
                     nullable: true,
                     default: Some(Value::Null),
                     unique: false,
                     index: false,
                     references: None,
                 },
-                schema::Column {
+                Column {
                     name: "ultrahd".into(),
                     datatype: DataType::Boolean,
-                    primary_key: false,
                     nullable: true,
                     default: Some(Value::Null),
                     unique: false,
@@ -126,16 +118,16 @@ fn status() -> Result<()> {
             raft: raft::Status {
                 leader: 1,
                 term: 1,
-                last_index: [(1, 27)].into(),
-                commit_index: 27,
-                apply_index: 27,
-                storage: storage::engine::Status {
+                match_index: [(1, 11)].into(),
+                commit_index: 11,
+                applied_index: 11,
+                storage: engine::Status {
                     name: "bitcask".to_string(),
-                    keys: 29,
-                    size: 1349,
-                    total_disk_size: 1856,
-                    live_disk_size: 1581,
-                    garbage_disk_size: 275
+                    keys: 13,
+                    size: 952,
+                    total_disk_size: 1166,
+                    live_disk_size: 1056,
+                    garbage_disk_size: 110,
                 },
             },
             mvcc: mvcc::Status {
@@ -143,11 +135,11 @@ fn status() -> Result<()> {
                 active_txns: 0,
                 storage: engine::Status {
                     name: "bitcask".to_string(),
-                    keys: 26,
-                    size: 1630,
-                    total_disk_size: 4556,
-                    live_disk_size: 1838,
-                    garbage_disk_size: 2718
+                    keys: 36,
+                    size: 2177,
+                    total_disk_size: 7601,
+                    live_disk_size: 2465,
+                    garbage_disk_size: 5136,
                 },
             }
         },
@@ -165,29 +157,30 @@ fn execute() -> Result<()> {
     let result = c.execute("SELECT * FROM genres")?;
     assert_eq!(
         result,
-        ResultSet::Query {
-            columns: vec![Column { name: Some("id".into()) }, Column { name: Some("name".into()) }],
-            rows: Box::new(std::iter::empty()),
+        StatementResult::Select {
+            columns: vec![
+                Label::Qualified("genres".into(), "id".into()),
+                Label::Qualified("genres".into(), "name".into()),
+            ],
+            rows: vec![
+                vec![Value::Integer(1), Value::String("Science Fiction".into())],
+                vec![Value::Integer(2), Value::String("Action".into())],
+                vec![Value::Integer(3), Value::String("Comedy".into())],
+            ],
         }
-    );
-    assert_rows(
-        result,
-        vec![
-            vec![Value::Integer(1), Value::String("Science Fiction".into())],
-            vec![Value::Integer(2), Value::String("Action".into())],
-            vec![Value::Integer(3), Value::String("Comedy".into())],
-        ],
     );
 
     let result = c.execute("SELECT * FROM genres WHERE FALSE")?;
     assert_eq!(
         result,
-        ResultSet::Query {
-            columns: vec![Column { name: Some("id".into()) }, Column { name: Some("name".into()) }],
-            rows: Box::new(std::iter::empty()),
+        StatementResult::Select {
+            columns: vec![
+                Label::Qualified("genres".into(), "id".into()),
+                Label::Qualified("genres".into(), "name".into()),
+            ],
+            rows: vec![],
         }
     );
-    assert_rows(result, Vec::new());
 
     assert_eq!(
         c.execute("SELECT * FROM x"),
@@ -197,11 +190,11 @@ fn execute() -> Result<()> {
     // INSERT
     assert_eq!(
         c.execute("INSERT INTO genres VALUES (1, 'Western')"),
-        Err(Error::InvalidInput("primary key 1 already exists for table genres".into())),
+        Err(Error::InvalidInput("primary key 1 already exists".into())),
     );
     assert_eq!(
         c.execute("INSERT INTO genres VALUES (9, 'Western')"),
-        Ok(ResultSet::Create { count: 1 }),
+        Ok(StatementResult::Insert { count: 1 }),
     );
     assert_eq!(
         c.execute("INSERT INTO x VALUES (9, 'Western')"),
@@ -211,20 +204,26 @@ fn execute() -> Result<()> {
     // UPDATE
     assert_eq!(
         c.execute("UPDATE genres SET name = 'Horror' WHERE FALSE"),
-        Ok(ResultSet::Update { count: 0 }),
+        Ok(StatementResult::Update { count: 0 }),
     );
     assert_eq!(
         c.execute("UPDATE genres SET name = 'Horror' WHERE id = 9"),
-        Ok(ResultSet::Update { count: 1 }),
+        Ok(StatementResult::Update { count: 1 }),
     );
     assert_eq!(
         c.execute("UPDATE genres SET id = 1 WHERE id = 9"),
-        Err(Error::InvalidInput("primary key 1 already exists for table genres".into()))
+        Err(Error::InvalidInput("primary key 1 already exists".into()))
     );
 
     // DELETE
-    assert_eq!(c.execute("DELETE FROM genres WHERE FALSE"), Ok(ResultSet::Delete { count: 0 }),);
-    assert_eq!(c.execute("DELETE FROM genres WHERE id = 9"), Ok(ResultSet::Delete { count: 1 }),);
+    assert_eq!(
+        c.execute("DELETE FROM genres WHERE FALSE"),
+        Ok(StatementResult::Delete { count: 0 }),
+    );
+    assert_eq!(
+        c.execute("DELETE FROM genres WHERE id = 9"),
+        Ok(StatementResult::Delete { count: 1 }),
+    );
     assert_eq!(
         c.execute("DELETE FROM genres WHERE x = 1"),
         Err(Error::InvalidInput("unknown field x".into()))
@@ -242,10 +241,10 @@ fn execute_txn() -> Result<()> {
     assert_eq!(c.txn(), None);
 
     // Committing a change in a txn should work
-    assert_eq!(c.execute("BEGIN")?, ResultSet::Begin { version: 2, read_only: false });
+    assert_eq!(c.execute("BEGIN")?, StatementResult::Begin { version: 2, read_only: false });
     assert_eq!(c.txn(), Some((2, false)));
     c.execute("INSERT INTO genres VALUES (4, 'Drama')")?;
-    assert_eq!(c.execute("COMMIT")?, ResultSet::Commit { version: 2 });
+    assert_eq!(c.execute("COMMIT")?, StatementResult::Commit { version: 2 });
     assert_eq!(c.txn(), None);
     assert_row(
         c.execute("SELECT * FROM genres WHERE id = 4")?,
@@ -254,19 +253,22 @@ fn execute_txn() -> Result<()> {
     assert_eq!(c.txn(), None);
 
     // Rolling back a change in a txn should also work
-    assert_eq!(c.execute("BEGIN")?, ResultSet::Begin { version: 3, read_only: false });
+    assert_eq!(c.execute("BEGIN")?, StatementResult::Begin { version: 3, read_only: false });
     assert_eq!(c.txn(), Some((3, false)));
     c.execute("INSERT INTO genres VALUES (5, 'Musical')")?;
     assert_row(
         c.execute("SELECT * FROM genres WHERE id = 5")?,
         vec![Value::Integer(5), Value::String("Musical".into())],
     );
-    assert_eq!(c.execute("ROLLBACK")?, ResultSet::Rollback { version: 3 });
+    assert_eq!(c.execute("ROLLBACK")?, StatementResult::Rollback { version: 3 });
     assert_rows(c.execute("SELECT * FROM genres WHERE id = 5")?, Vec::new());
     assert_eq!(c.txn(), None);
 
     // Starting a read-only txn should block writes
-    assert_eq!(c.execute("BEGIN READ ONLY")?, ResultSet::Begin { version: 4, read_only: true });
+    assert_eq!(
+        c.execute("BEGIN READ ONLY")?,
+        StatementResult::Begin { version: 4, read_only: true }
+    );
     assert_eq!(c.txn(), Some((4, true)));
     assert_row(
         c.execute("SELECT * FROM genres WHERE id = 4")?,
@@ -277,13 +279,13 @@ fn execute_txn() -> Result<()> {
         c.execute("SELECT * FROM genres WHERE id = 4")?,
         vec![Value::Integer(4), Value::String("Drama".into())],
     );
-    assert_eq!(c.execute("COMMIT")?, ResultSet::Commit { version: 4 });
+    assert_eq!(c.execute("COMMIT")?, StatementResult::Commit { version: 4 });
 
     // Starting a time-travel txn should work, it shouldn't see recent changes, and it should
     // block writes
     assert_eq!(
         c.execute("BEGIN READ ONLY AS OF SYSTEM TIME 2")?,
-        ResultSet::Begin { version: 2, read_only: true },
+        StatementResult::Begin { version: 2, read_only: true },
     );
     assert_eq!(c.txn(), Some((2, true)));
     assert_rows(
@@ -295,18 +297,18 @@ fn execute_txn() -> Result<()> {
         ],
     );
     assert_eq!(c.execute("INSERT INTO genres VALUES (5, 'Musical')"), Err(Error::ReadOnly));
-    assert_eq!(c.execute("COMMIT")?, ResultSet::Commit { version: 2 });
+    assert_eq!(c.execute("COMMIT")?, StatementResult::Commit { version: 2 });
 
     // A txn should still be usable after an error occurs
-    assert_eq!(c.execute("BEGIN")?, ResultSet::Begin { version: 4, read_only: false });
+    assert_eq!(c.execute("BEGIN")?, StatementResult::Begin { version: 4, read_only: false });
     c.execute("INSERT INTO genres VALUES (5, 'Horror')")?;
     assert_eq!(
         c.execute("INSERT INTO genres VALUES (5, 'Musical')"),
-        Err(Error::InvalidInput("primary key 5 already exists for table genres".into()))
+        Err(Error::InvalidInput("primary key 5 already exists".into()))
     );
     assert_eq!(c.txn(), Some((4, false)));
     c.execute("INSERT INTO genres VALUES (6, 'Western')")?;
-    assert_eq!(c.execute("COMMIT")?, ResultSet::Commit { version: 4 });
+    assert_eq!(c.execute("COMMIT")?, StatementResult::Commit { version: 4 });
     assert_rows(
         c.execute("SELECT * FROM genres")?,
         vec![
@@ -330,8 +332,8 @@ fn execute_txn_concurrent() -> Result<()> {
     let mut b = tc.connect_any()?;
 
     // Concurrent updates should throw a serialization failure on conflict.
-    assert_eq!(a.execute("BEGIN")?, ResultSet::Begin { version: 2, read_only: false });
-    assert_eq!(b.execute("BEGIN")?, ResultSet::Begin { version: 3, read_only: false });
+    assert_eq!(a.execute("BEGIN")?, StatementResult::Begin { version: 2, read_only: false });
+    assert_eq!(b.execute("BEGIN")?, StatementResult::Begin { version: 3, read_only: false });
 
     assert_row(
         a.execute("SELECT * FROM genres WHERE id = 1")?,
@@ -344,12 +346,12 @@ fn execute_txn_concurrent() -> Result<()> {
 
     assert_eq!(
         a.execute("UPDATE genres SET name = 'x' WHERE id = 1"),
-        Ok(ResultSet::Update { count: 1 })
+        Ok(StatementResult::Update { count: 1 })
     );
     assert_eq!(b.execute("UPDATE genres SET name = 'y' WHERE id = 1"), Err(Error::Serialization));
 
-    assert_eq!(a.execute("COMMIT"), Ok(ResultSet::Commit { version: 2 }));
-    assert_eq!(b.execute("ROLLBACK"), Ok(ResultSet::Rollback { version: 3 }));
+    assert_eq!(a.execute("COMMIT"), Ok(StatementResult::Commit { version: 2 }));
+    assert_eq!(b.execute("ROLLBACK"), Ok(StatementResult::Rollback { version: 3 }));
 
     assert_row(
         a.execute("SELECT * FROM genres WHERE id = 1")?,

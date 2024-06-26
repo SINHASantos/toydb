@@ -2,13 +2,14 @@
 scan
 scan 3..7
 ---
-<empty>
-<empty>
+ok
 
 # Append a few entries.
-append 1
-append 1 foo
-append 2 bar
+set_term 1
+append
+append foo
+set_term 2
+append bar
 ---
 append → 1@1 None
 append → 2@1 foo
@@ -29,7 +30,7 @@ scan 2..
 
 scan 4..
 ---
-<empty>
+ok
 
 scan 0..
 ---
@@ -55,11 +56,11 @@ scan "..7"
 
 scan "..1"
 ---
-<empty>
+ok
 
 scan "..0"
 ---
-<empty>
+ok
 
 # Both bounds.
 scan 1..2
@@ -79,7 +80,7 @@ scan 0..7
 
 scan 1..1
 ---
-<empty>
+ok
 
 # Bounds panics.
 !scan 1..0

@@ -5,13 +5,14 @@
 
 #![warn(clippy::all)]
 
+use itertools::Itertools as _;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{error::ReadlineError, Editor, Modifiers};
 use rustyline_derive::{Completer, Helper, Highlighter, Hinter};
 use toydb::errinput;
 use toydb::error::{Error, Result};
-use toydb::sql::execution::ResultSet;
+use toydb::sql::engine::StatementResult;
 use toydb::sql::parser::{Lexer, Token};
 use toydb::Client;
 
@@ -118,7 +119,7 @@ The following commands are also available:
                 let status = self.client.status()?;
                 let mut node_logs = status
                     .raft
-                    .last_index
+                    .match_index
                     .iter()
                     .map(|(id, index)| format!("{}:{}", id, index))
                     .collect::<Vec<_>>();
@@ -134,9 +135,9 @@ Storage:   {keys} keys, {logical_size} MB logical, {nodes}x {disk_size} MB disk,
                     server = status.server,
                     leader = status.raft.leader,
                     term = status.raft.term,
-                    nodes = status.raft.last_index.len(),
+                    nodes = status.raft.match_index.len(),
                     committed = status.raft.commit_index,
-                    applied = status.raft.apply_index,
+                    applied = status.raft.applied_index,
                     raft_storage = status.raft.storage.name,
                     raft_size =
                         format_args!("{:.3}", status.raft.storage.size as f64 / 1000.0 / 1000.0),
@@ -181,37 +182,27 @@ Storage:   {keys} keys, {logical_size} MB logical, {nodes}x {disk_size} MB disk,
     /// Runs a query and displays the results
     fn execute_query(&mut self, query: &str) -> Result<()> {
         match self.client.execute(query)? {
-            ResultSet::Begin { version, read_only } => match read_only {
+            StatementResult::Begin { version, read_only } => match read_only {
                 false => println!("Began transaction at new version {}", version),
                 true => println!("Began read-only transaction at version {}", version),
             },
-            ResultSet::Commit { version: id } => println!("Committed transaction {}", id),
-            ResultSet::Rollback { version: id } => println!("Rolled back transaction {}", id),
-            ResultSet::Create { count } => println!("Created {} rows", count),
-            ResultSet::Delete { count } => println!("Deleted {} rows", count),
-            ResultSet::Update { count } => println!("Updated {} rows", count),
-            ResultSet::CreateTable { name } => println!("Created table {}", name),
-            ResultSet::DropTable { name, existed } => match existed {
+            StatementResult::Commit { version: id } => println!("Committed transaction {}", id),
+            StatementResult::Rollback { version: id } => println!("Rolled back transaction {}", id),
+            StatementResult::Insert { count } => println!("Created {} rows", count),
+            StatementResult::Delete { count } => println!("Deleted {} rows", count),
+            StatementResult::Update { count } => println!("Updated {} rows", count),
+            StatementResult::CreateTable { name } => println!("Created table {}", name),
+            StatementResult::DropTable { name, existed } => match existed {
                 true => println!("Dropped table {}", name),
                 false => println!("Table {} did not exit", name),
             },
-            ResultSet::Explain(plan) => println!("{}", plan),
-            ResultSet::Query { columns, mut rows } => {
+            StatementResult::Explain(plan) => println!("{}", plan),
+            StatementResult::Select { columns, rows } => {
                 if self.show_headers {
-                    println!(
-                        "{}",
-                        columns
-                            .iter()
-                            .map(|c| c.name.as_deref().unwrap_or("?"))
-                            .collect::<Vec<_>>()
-                            .join("|")
-                    );
+                    println!("{}", columns.into_iter().map(|c| c.as_header()).join("|"));
                 }
-                while let Some(row) = rows.next().transpose()? {
-                    println!(
-                        "{}",
-                        row.into_iter().map(|v| format!("{}", v)).collect::<Vec<_>>().join("|")
-                    );
+                for row in rows {
+                    println!("{}", row.into_iter().map(|v| v.to_string()).join("|"));
                 }
             }
         }

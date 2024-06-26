@@ -14,12 +14,6 @@ impl Memory {
     }
 }
 
-impl std::fmt::Display for Memory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "memory")
-    }
-}
-
 impl Engine for Memory {
     type ScanIterator<'a> = ScanIterator<'a>;
 
@@ -54,7 +48,7 @@ impl Engine for Memory {
 
     fn status(&mut self) -> Result<Status> {
         Ok(Status {
-            name: self.to_string(),
+            name: "memory".to_string(),
             keys: self.data.len() as u64,
             size: self.data.iter().fold(0, |size, (k, v)| size + k.len() as u64 + v.len() as u64),
             total_disk_size: 0,
@@ -91,7 +85,17 @@ impl<'a> DoubleEndedIterator for ScanIterator<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::engine::test::Runner;
     use super::*;
+    use test_each_file::test_each_path;
 
-    super::super::engine::tests::test_engine!(Memory::new());
+    // Run common goldenscript tests in src/storage/testscripts/engine.
+    test_each_path! { in "src/storage/testscripts/engine" as engine => test_goldenscript }
+
+    // Also run Memory-specific tests in src/storage/testscripts/memory.
+    test_each_path! { in "src/storage/testscripts/memory" as scripts => test_goldenscript }
+
+    fn test_goldenscript(path: &std::path::Path) {
+        goldenscript::run(&mut Runner::new(Memory::new()), path).expect("goldenscript failed")
+    }
 }

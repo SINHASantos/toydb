@@ -1,7 +1,6 @@
 //! Schema-related tests, using an in-memory database against golden files in tests/sql/chema/
 use toydb::error::Result;
-use toydb::sql::engine::{Engine as _, Transaction as _};
-use toydb::sql::schema::Catalog as _;
+use toydb::sql::engine::{Catalog as _, Engine as _, Transaction as _};
 
 use goldenfile::Mint;
 use std::io::Write;
@@ -29,7 +28,7 @@ macro_rules! test_schema {
 
                 write!(f, "Storage:")?;
                 let txn = engine.begin()?;
-                for table in txn.scan_tables()? {
+                for table in txn.list_tables()? {
                     write!(f, "\n{}\n", table)?;
                     for row in txn.scan(&table.name, None)? {
                         write!(f, "{:?}\n", row?)?;
@@ -60,7 +59,6 @@ test_schema! {
             id INTEGER PRIMARY KEY,
             "bool" BOOL,
             "boolean" BOOLEAN,
-            "char" CHAR,
             "double" DOUBLE,
             "float" FLOAT,
             "int" INT,
@@ -208,10 +206,6 @@ test_schema! { with [
     insert_string: r#"INSERT INTO types (id, "string") VALUES (0, 'abc')"#,
     insert_string_empty: r#"INSERT INTO types (id, "string") VALUES (0, '')"#,
     insert_string_unicode: r#"INSERT INTO types (id, "string") VALUES (0, ' Hi! 👋')"#,
-    insert_string_1024: &format!(r#"INSERT INTO types (id, "string") VALUES (0, '{}')"#, "a".repeat(1024)),
-    insert_string_1025: &format!(r#"INSERT INTO types (id, "string") VALUES (0, '{}')"#, "a".repeat(1025)),
-    insert_string_1024_unicode: &format!(r#"INSERT INTO types (id, "string") VALUES (0, '{}')"#, "𐍈".repeat(256)),
-    insert_string_1025_unicode: &format!(r#"INSERT INTO types (id, "string") VALUES (0, '{}x')"#, "𐍈".repeat(256)),
     insert_string_null: r#"INSERT INTO types (id, "string") VALUES (0, NULL)"#,
     insert_string_boolean: r#"INSERT INTO types (id, "string") VALUES (0, FALSE)"#,
     insert_string_float: r#"INSERT INTO types (id, "string") VALUES (0, 3.14)"#,
